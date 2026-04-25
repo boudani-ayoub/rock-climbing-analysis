@@ -1,21 +1,12 @@
 """
-Climbing AI - Phase 5: Unified Real-Time Script
-================================================
-Runs all modules in one real-time loop:
-  - Person detection + ByteTrack ID tracking
-  - Pose estimation (skeleton + keypoints)
-  - Path tracking
-  - Triangle support analysis
-  - Lock arm warning
-  - Force analysis
-  - Hold detection + grip confirmation
+Climbing AI — Real-Time Analysis
+=================================
+Detects and tracks climbers, estimates pose, analyzes technique,
+detects holds, and produces a scored summary report.
 
 Usage:
     python main2.py --source "your_video.MOV" --weight 45
-    python main2.py                                         # live camera
-
-Requirements:
-    pip install ultralytics opencv-python numpy onnxruntime
+    python main2.py                               # live camera
 """
 
 import cv2
@@ -32,48 +23,33 @@ from ultralytics import YOLO
 #  CONFIG
 # ═══════════════════════════════════════════════════════
 
-# ── Models (ONNX versions for GPU/NPU acceleration) ───
-TRACK_MODEL  = "yolo11m.onnx"
-POSE_MODEL   = "yolo11m-pose.onnx"
-HOLD_MODEL   = "runs/hold_detection/weights/best.onnx"
+TRACK_MODEL    = "yolo11m.onnx"
+POSE_MODEL     = "yolo11m-pose.onnx"
+HOLD_MODEL     = "runs/hold_detection/weights/best.onnx"
 
-# ── Fallback to .pt if .onnx not found ────────────────
 TRACK_MODEL_PT = "yolo11m.pt"
 POSE_MODEL_PT  = "yolo11m-pose.pt"
 HOLD_MODEL_PT  = "runs/hold_detection/weights/best.pt"
 
-# ── Source ────────────────────────────────────────────
-DEFAULT_SOURCE   = 0          # 0 = first camera, or path to video file
-
-# ── Climber selection ─────────────────────────────────
-# "largest" = biggest bounding box (closest to camera)
-# "highest" = highest on the wall
-# None      = track all climbers
+DEFAULT_SOURCE   = 0
 TARGET_SELECTION = None
+BODY_WEIGHT_KG   = None
 
-# ── Body weight ───────────────────────────────────────
-BODY_WEIGHT_KG   = None       # set via --weight or hardcode here
+GROUND_FILTER    = 0.80
+MIN_PERSON_H     = 30
 
-# ── Wall filter ───────────────────────────────────────
-GROUND_FILTER    = 0.80       # ignore anyone with center Y > 80% of frame
-MIN_PERSON_H     = 30         # min person height in pixels
-
-# ── Keypoint confidence ───────────────────────────────
 KP_CONF          = 0.25
 CROP_PAD         = 0.20
 
-# ── Hold detection ────────────────────────────────────
-HOLD_DETECT_FRAMES   = 5
-HOLD_CONF            = 0.35
-HOLD_NMS_DIST        = 30
-GRIP_RADIUS          = 50
-GRIP_CONFIRM_FRAMES  = 8
+HOLD_DETECT_FRAMES  = 5
+HOLD_CONF           = 0.35
+HOLD_NMS_DIST       = 30
+GRIP_RADIUS         = 50
+GRIP_CONFIRM_FRAMES = 8
 
-# ── Triangle support ──────────────────────────────────
 TRI_GOOD_AREA    = 25000
 TRI_WARN_AREA    = 8000
 
-# ── Lock arm ──────────────────────────────────────────
 LOCK_ANGLE       = 110
 LOCK_SECONDS     = 3.0
 
@@ -85,26 +61,20 @@ GRAVITY          = 9.81
 # ═══════════════════════════════════════════════════════
 
 def setup_device():
-    """Use CPU for inference."""
     print("\n  Device: CPU")
     return "cpu", "CPU"
 
 
 def load_model(onnx_path, pt_path, task, device):
-    """
-    Load ONNX model if available, otherwise fall back to .pt.
-    """
     if Path(onnx_path).exists():
         print(f"  Loading ONNX : {onnx_path}")
         return YOLO(onnx_path, task=task)
     elif Path(pt_path).exists():
-        print(f"  Loading PT   : {pt_path}  (run export to get ONNX)")
+        print(f"  Loading PT   : {pt_path}")
         return YOLO(pt_path)
     else:
         raise FileNotFoundError(
-            f"Model not found.\n"
-            f"  ONNX: {onnx_path}\n"
-            f"  PT  : {pt_path}"
+            f"Model not found.\n  ONNX: {onnx_path}\n  PT  : {pt_path}"
         )
 
 
@@ -118,12 +88,12 @@ ID_COLORS = [
 ]
 def id_color(pid): return ID_COLORS[(pid-1) % len(ID_COLORS)]
 
-COL_PATH      = (255, 60,  255)
-COL_TRI_GOOD  = (50,  220,  50)
-COL_TRI_OK    = (50,  200, 220)
-COL_TRI_WARN  = (50,   50, 255)
+COL_PATH      = (255,  60, 255)
+COL_TRI_GOOD  = ( 50, 220,  50)
+COL_TRI_OK    = ( 50, 200, 220)
+COL_TRI_WARN  = ( 50,  50, 255)
 COL_HOLD_IDLE = (160, 160, 160)
-COL_HOLD_HAND = (0,   165, 255)
+COL_HOLD_HAND = (  0, 165, 255)
 COL_HOLD_FOOT = (255, 100,  50)
 
 
@@ -205,7 +175,7 @@ def select_target(wall_climbers):
 
 def draw_skeleton(frame, keypoints, color):
     pts = list(keypoints.values())
-    if len(pts) < 17: return   # skip if pose failed
+    if len(pts) < 17: return
     for p1, p2 in SKELETON:
         k1, k2 = pts[p1], pts[p2]
         if k1[2] >= KP_CONF and k2[2] >= KP_CONF:
@@ -302,7 +272,7 @@ def draw_triangle(frame, kps):
         return "unknown"
 
     p1, p2 = hands[0], hands[1]
-    foot   = min(feet, key=lambda f: f[1])   # highest foot = on a hold
+    foot   = min(feet, key=lambda f: f[1])
     area   = tri_area(p1, p2, foot)
 
     status = ("good" if area >= TRI_GOOD_AREA
@@ -332,8 +302,8 @@ def draw_triangle(frame, kps):
 
 class LockArmDetector:
     def __init__(self, fps):
-        self.thresh  = int(LOCK_SECONDS * fps)
-        self.frames  = defaultdict(lambda: {"left":0,"right":0})
+        self.thresh = int(LOCK_SECONDS * fps)
+        self.frames = defaultdict(lambda: {"left":0,"right":0})
 
     def update(self, pid, kps):
         status = {"left":"unknown","right":"unknown","warning":False}
@@ -361,32 +331,26 @@ class LockArmDetector:
         for side, el_name in [("left","left_elbow"),("right","right_elbow")]:
             el = kp(kps, el_name)
             if el is None: continue
-            ex, ey  = int(el[0]), int(el[1])
-            f       = self.frames[pid][side]
+            ex, ey    = int(el[0]), int(el[1])
+            f         = self.frames[pid][side]
             if f > 0:
-                pct     = min(f / self.thresh, 1.0)
-                warning = pct >= 1.0
-                color   = (50, 50, 255) if warning else (50, 180, 255)
-                # Circle grows from radius 14 → 26 when warning fires
-                radius  = 26 if warning else int(14 + pct * 6)
+                pct       = min(f / self.thresh, 1.0)
+                warning   = pct >= 1.0
+                color     = (50, 50, 255) if warning else (50, 180, 255)
+                radius    = 26 if warning else int(14 + pct * 6)
                 thickness = 3 if warning else 2
                 cv2.ellipse(frame, (ex, ey), (radius, radius), -90,
                             0, int(pct * 360), color, thickness, cv2.LINE_AA)
-                # Show "Stretch arm!" label next to elbow when warning fires
                 if warning:
-                    lbl_x = ex + radius + 5
-                    lbl_y = ey + 5
                     cv2.putText(frame, "Stretch arm!",
-                                (lbl_x, lbl_y),
+                                (ex + radius + 5, ey + 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                                 (50, 50, 255), 2, cv2.LINE_AA)
         if arm_status.get("warning"):
             H = frame.shape[0]
             cv2.rectangle(frame, (0, H-50), (frame.shape[1], H), (0, 0, 180), -1)
-            cv2.putText(frame,
-                        "WARNING: Lock arm — straighten your arms!",
-                        (15, H-18), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (255, 255, 255), 2)
+            cv2.putText(frame, "WARNING: Lock arm — straighten your arms!",
+                        (15, H-18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
 
 # ═══════════════════════════════════════════════════════
@@ -436,51 +400,36 @@ class ForceAnalyzer:
 class ClimbScorer:
     """
     Live score (0-100) updated every frame.
-
-    Technical score (60%):
-      - Triangle stability  25% → % frames with green/ok triangle
-      - Arm technique       20% → penalty for lock arm time
-      - Force balance       15% → how even L/R hand load is
-
-    Performance score (40%):
-      - Height reached      20% → highest Y point (normalized to frame)
-      - Path efficiency     20% → straight-line dist / actual path length
+    Technical (60%): triangle stability, arm technique, force balance.
+    Performance (40%): path efficiency.
     """
 
     def __init__(self, frame_height):
         self.H           = frame_height
-        # triangle
         self.tri_good    = 0
         self.tri_total   = 0
-        # arm
         self.lock_frames = 0
         self.arm_total   = 0
-        # force
         self.force_diffs = []
-        # performance
-        self.start_y     = None   # Y of first detected position
-        self.best_y      = None   # smallest Y seen (highest on wall)
+        self.start_y     = None
+        self.best_y      = None
         self.path_len    = 0.0
         self.prev_pos    = None
 
     def update(self, tri_status, arm_status, force_data, hip_pos, path_length):
-        # Triangle
         if tri_status != "unknown":
             self.tri_total += 1
             if tri_status in ("good", "ok"):
                 self.tri_good += 1
 
-        # Arm
         self.arm_total += 1
         if arm_status.get("warning"):
             self.lock_frames += 1
 
-        # Force balance
         if force_data:
             diff = abs(force_data["pct_left"] - force_data["pct_right"])
             self.force_diffs.append(diff)
 
-        # Height + path
         if hip_pos:
             cy = hip_pos[1]
             if self.start_y is None:
@@ -491,23 +440,14 @@ class ClimbScorer:
         self.path_len = path_length
 
     def compute(self):
-        """Returns (overall_score, breakdown_dict) — all 0-100."""
+        tri_score = (self.tri_good / self.tri_total * 100) if self.tri_total > 0 else 50.0
 
-        # ── Technical ────────────────────────────────────
-        # Triangle stability (25 pts)
-        if self.tri_total > 0:
-            tri_score = (self.tri_good / self.tri_total) * 100
-        else:
-            tri_score = 50.0
-
-        # Arm technique (20 pts) — starts at 100, penalty per lock frame
         if self.arm_total > 0:
             lock_ratio = self.lock_frames / self.arm_total
             arm_score  = max(0, 100 - lock_ratio * 300)
         else:
             arm_score = 100.0
 
-        # Force balance (15 pts) — 100 when perfectly even (50/50), 0 when all one hand
         if self.force_diffs:
             avg_diff    = sum(self.force_diffs) / len(self.force_diffs)
             force_score = max(0, 100 - avg_diff * 2)
@@ -516,38 +456,27 @@ class ClimbScorer:
 
         technical = (tri_score * 0.25 + arm_score * 0.20 + force_score * 0.15) / 0.60
 
-        # ── Performance ───────────────────────────────────
-        # Path efficiency (40%) — height removed per client request
         if self.start_y and self.best_y and self.path_len > 0:
-            direct_dist      = abs(self.start_y - self.best_y)
-            efficiency       = min(1.0, direct_dist / self.path_len)
-            efficiency_score = efficiency * 100
+            efficiency_score = min(1.0, abs(self.start_y - self.best_y) / self.path_len) * 100
         else:
             efficiency_score = 50.0
 
-        performance = efficiency_score
-
-        # ── Overall ───────────────────────────────────────
-        overall = round(technical * 0.60 + performance * 0.40)
+        overall = round(technical * 0.60 + efficiency_score * 0.40)
 
         return overall, {
-            "triangle":    round(tri_score),
-            "arm":         round(arm_score),
-            "force_bal":   round(force_score),
-            "efficiency":  round(efficiency_score),
-            "technical":   round(technical),
-            "performance": round(performance),
+            "triangle":   round(tri_score),
+            "arm":        round(arm_score),
+            "force_bal":  round(force_score),
+            "efficiency": round(efficiency_score),
+            "technical":  round(technical),
+            "performance":round(efficiency_score),
         }
 
     def draw_live(self, frame, pid, id_color, badge_index=0):
-        """Draw live score badge. badge_index offsets position for multiple climbers."""
         overall, breakdown = self.compute()
         W, H = frame.shape[1], frame.shape[0]
 
-        # Score color: green > 75, yellow > 50, red <= 50
         score_color = (50,220,50) if overall >= 75 else (50,200,220) if overall >= 50 else (50,50,255)
-
-        # Each badge is 150px wide — stack left from right edge
         badge_w = 150
         px = W - 10 - badge_w * (badge_index + 1)
         py = H - 180
@@ -555,20 +484,14 @@ class ClimbScorer:
         ov = frame.copy()
         cv2.rectangle(ov, (px, py), (px+badge_w, H-10), (15,15,15), -1)
         cv2.addWeighted(ov, 0.7, frame, 0.3, 0, frame)
-
-        # Colored left border strip per climber ID
         cv2.rectangle(frame, (px, py), (px+4, H-10), id_color, -1)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        # Big score number
         cv2.putText(frame, str(overall), (px+12, py+62),
                     font, 2.2, score_color, 4, cv2.LINE_AA)
-        cv2.putText(frame, "/100", (px+12, py+82),
-                    font, 0.5, (180,180,180), 1)
-        cv2.putText(frame, f"ID {pid}", (px+12, py+100),
-                    font, 0.4, id_color, 1)
+        cv2.putText(frame, "/100", (px+12, py+82), font, 0.5, (180,180,180), 1)
+        cv2.putText(frame, f"ID {pid}", (px+12, py+100), font, 0.4, id_color, 1)
 
-        # Mini breakdown bars
         items = [
             ("TRI", breakdown["triangle"],  COL_TRI_GOOD),
             ("ARM", breakdown["arm"],       (100,220,255)),
@@ -585,42 +508,35 @@ class ClimbScorer:
             by += 14
 
     def draw_final(self, frame, pid, id_color, card_index=0, total_cards=1):
-        """Draw final score card. Cards are placed side by side for multiple climbers."""
         overall, bd = self.compute()
         H, W = frame.shape[:2]
 
-        # Card is 420px wide — center all cards together horizontally
-        card_w   = 420
-        gap      = 20
-        total_w  = total_cards * card_w + (total_cards - 1) * gap
-        start_x  = (W - total_w) // 2
-        cx       = start_x + card_index * (card_w + gap) + card_w // 2
-        card_x1  = cx - card_w // 2
-        card_x2  = cx + card_w // 2
-        card_y1  = H // 2 - 190
-        card_y2  = H // 2 + 210
+        card_w  = 420
+        gap     = 20
+        total_w = total_cards * card_w + (total_cards - 1) * gap
+        start_x = (W - total_w) // 2
+        cx      = start_x + card_index * (card_w + gap) + card_w // 2
+        card_x1 = cx - card_w // 2
+        card_x2 = cx + card_w // 2
+        card_y1 = H // 2 - 190
+        card_y2 = H // 2 + 210
 
-        # Card background
         ov = frame.copy()
         cv2.rectangle(ov, (card_x1, card_y1), (card_x2, card_y2), (10,10,10), -1)
         cv2.addWeighted(ov, 0.88, frame, 0.12, 0, frame)
-        # Colored top border strip matching climber ID color
         cv2.rectangle(frame, (card_x1, card_y1), (card_x2, card_y1+4), id_color, -1)
         cv2.rectangle(frame, (card_x1, card_y1), (card_x2, card_y2), (70,70,70), 1)
 
         font        = cv2.FONT_HERSHEY_SIMPLEX
         score_color = (50,220,50) if overall >= 75 else (50,200,220) if overall >= 50 else (50,50,255)
 
-        # Climber ID label
         cv2.putText(frame, f"Climber ID {pid}",
                     (card_x1+14, card_y1+26), font, 0.55, id_color, 1)
-        # Big score
         cv2.putText(frame, str(overall),
                     (cx-38, card_y1+100), font, 3.0, score_color, 6, cv2.LINE_AA)
         cv2.putText(frame, "/ 100",
                     (cx-28, card_y1+122), font, 0.6, (160,160,160), 1)
 
-        # Breakdown table
         rows = [
             ("Technical",    bd["technical"],   True),
             ("  Triangle",   bd["triangle"],    False),
@@ -629,7 +545,7 @@ class ClimbScorer:
             ("Performance",  bd["performance"], True),
             ("  Efficiency", bd["efficiency"],  False),
         ]
-        y = card_y1 + 142
+        y     = card_y1 + 142
         bar_w = 90
         for label, val, is_section in rows:
             col  = (220,220,220) if is_section else (160,160,160)
@@ -640,8 +556,7 @@ class ClimbScorer:
             cv2.rectangle(frame, (bar_x, y-8), (bar_x+bar_w, y), (50,50,50), -1)
             bar_col = (50,220,50) if val >= 75 else (50,200,220) if val >= 50 else (50,50,255)
             cv2.rectangle(frame, (bar_x, y-8), (bar_x+filled, y), bar_col, -1)
-            cv2.putText(frame, str(val),
-                        (bar_x+bar_w+6, y), font, 0.36, col, 1)
+            cv2.putText(frame, str(val), (bar_x+bar_w+6, y), font, 0.36, col, 1)
             y += 20 if is_section else 17
 
 
@@ -651,9 +566,9 @@ class ClimbScorer:
 
 def draw_stats_panel(frame, pid, arm_status, force_data,
                      tri_status, path_len, color, force_analyzer):
-    W  = frame.shape[1]
-    px, py = W-200, 10
-    ov = frame.copy()
+    W       = frame.shape[1]
+    px, py  = W-200, 10
+    ov      = frame.copy()
     cv2.rectangle(ov, (px,py), (px+190,py+185), (15,15,15), -1)
     cv2.addWeighted(ov, 0.7, frame, 0.3, 0, frame)
     f = cv2.FONT_HERSHEY_SIMPLEX
@@ -680,7 +595,7 @@ def draw_stats_panel(frame, pid, arm_status, force_data,
     cv2.putText(frame, f"Path: {path_len:.0f}px", (x,y), f, 0.38, (200,200,200), 1)
 
 def draw_legend(frame):
-    H = frame.shape[0]
+    H     = frame.shape[0]
     items = [(COL_HOLD_IDLE,"Detected hold"),
              (COL_HOLD_HAND,"Hand hold"),
              (COL_HOLD_FOOT,"Foot hold")]
@@ -703,8 +618,7 @@ def detect_holds(hold_model, cap, W, H, device):
     for _ in range(HOLD_DETECT_FRAMES):
         ret, frame = cap.read()
         if not ret: break
-        results = hold_model(frame, verbose=False,
-                             conf=HOLD_CONF, device=device)
+        results = hold_model(frame, verbose=False, conf=HOLD_CONF, device=device)
         for r in results:
             if r.boxes is None: continue
             for box in r.boxes:
@@ -717,7 +631,6 @@ def detect_holds(hold_model, cap, W, H, device):
                 })
     cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
 
-    # NMS — merge duplicates
     raw   = sorted(raw, key=lambda h: h["conf"], reverse=True)
     holds = []
     for h in raw:
@@ -732,9 +645,9 @@ def detect_holds(hold_model, cap, W, H, device):
 
 class GripTracker:
     def __init__(self, holds):
-        self.holds   = holds
-        self.status  = ["idle"] * len(holds)
-        self.counter = defaultdict(lambda: defaultdict(int))
+        self.holds    = holds
+        self.status   = ["idle"] * len(holds)
+        self.counter  = defaultdict(lambda: defaultdict(int))
         self.limb_map = {
             "left_wrist":"hand","right_wrist":"hand",
             "left_ankle":"foot","right_ankle":"foot",
@@ -796,32 +709,25 @@ def run(source, body_weight_kg=None, output_path=None):
     print("  Climbing AI — Real-Time Analysis")
     print("="*55)
 
-    # ── Detect best device ────────────────────────────
     device, device_name = setup_device()
 
-    # ── Load models ───────────────────────────────────
     print("\nLoading models...")
     track_model = load_model(TRACK_MODEL, TRACK_MODEL_PT, "detect", device)
     pose_model  = load_model(POSE_MODEL,  POSE_MODEL_PT,  "pose",   device)
 
-    hold_model  = None
-    hold_onnx   = Path(HOLD_MODEL)
-    hold_pt     = Path(HOLD_MODEL_PT)
-    if hold_onnx.exists():
+    hold_model = None
+    if Path(HOLD_MODEL).exists():
         print(f"  Loading ONNX : {HOLD_MODEL}")
         hold_model = YOLO(HOLD_MODEL, task="detect")
-    elif hold_pt.exists():
+    elif Path(HOLD_MODEL_PT).exists():
         print(f"  Loading PT   : {HOLD_MODEL_PT}")
         hold_model = YOLO(HOLD_MODEL_PT)
     else:
         print("  Hold model   : NOT FOUND — hold detection disabled")
-        print("  Train first  : python phase3_train.py")
 
     print(f"  Body weight  : {body_weight_kg} kg" if body_weight_kg
           else "  Body weight  : not set — force analysis disabled")
-    print(f"  Target select: {TARGET_SELECTION}")
 
-    # ── Open video source ─────────────────────────────
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         raise IOError(f"Cannot open source: {source}")
@@ -834,42 +740,35 @@ def run(source, body_weight_kg=None, output_path=None):
     print(f"\n  Source  : {'Live camera' if is_live else source}")
     print(f"  Size    : {W}x{H} @ {fps:.1f}fps")
 
-    # ── Output writer ─────────────────────────────────
     writer = None
     if output_path:
         writer = cv2.VideoWriter(
-            output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps, (W, H))
+            output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
         print(f"  Saving  : {output_path}")
 
-    # ── Detect holds once (runs only here) ────────────
     holds, grip_tracker = [], None
     if hold_model:
         print("\nDetecting holds (runs once then cached)...")
-        holds       = detect_holds(hold_model, cap, W, H, device)
+        holds        = detect_holds(hold_model, cap, W, H, device)
         grip_tracker = GripTracker(holds)
 
-    # ── Instantiate modules ───────────────────────────
     path_tracker   = PathTracker()
     lock_detector  = LockArmDetector(fps)
     force_analyzer = ForceAnalyzer(body_weight_kg) if body_weight_kg else None
-    scorers        = {}   # { person_id: ClimbScorer }
-    last_colors    = {}   # { person_id: color } — remember color when lost
+    scorers        = {}
+    last_colors    = {}
 
-    # ── Main loop ─────────────────────────────────────
     print("\nStarting... (press Q to quit)\n")
-    frame_num  = 0
-    fps_cnt    = 0
-    fps_timer  = time.time()
-    disp_fps   = 0.0
+    frame_num = 0
+    fps_cnt   = 0
+    fps_timer = time.time()
+    disp_fps  = 0.0
 
     while True:
         ret, frame = cap.read()
         if not ret: break
         frame_num += 1
 
-        # ── Track all people ──────────────────────────
         track_results = track_model.track(
             frame,
             classes=[0],
@@ -879,8 +778,8 @@ def run(source, body_weight_kg=None, output_path=None):
             device=device,
         )
 
-        wall_climbers  = []
-        all_kps_holds  = {}
+        wall_climbers = []
+        all_kps_holds = {}
 
         for result in track_results:
             if result.boxes is None or result.boxes.id is None:
@@ -894,7 +793,6 @@ def run(source, body_weight_kg=None, output_path=None):
                     cv2.rectangle(frame,(x1,y1),(x2,y2),(60,60,60),1)
                     continue
 
-                # Crop + zoom for better pose on small climbers
                 x1,y1,x2,y2 = map(int, bxyxy)
                 px1 = max(0, x1-int((x2-x1)*CROP_PAD))
                 py1 = max(0, y1-int((y2-y1)*CROP_PAD))
@@ -902,8 +800,7 @@ def run(source, body_weight_kg=None, output_path=None):
                 py2 = min(H, y2+int((y2-y1)*CROP_PAD))
                 crop = frame[py1:py2, px1:px2]
 
-                pose_results = pose_model(
-                    crop, verbose=False, device=device)
+                pose_results = pose_model(crop, verbose=False, device=device)
 
                 best_kps, best_sum = None, -1
                 for pr in pose_results:
@@ -917,16 +814,11 @@ def run(source, body_weight_kg=None, output_path=None):
                                 pr.keypoints.conf[pi],
                                 ox=px1, oy=py1)
 
-                # Always add tracked climber even if pose failed
-                # Modules gracefully handle missing keypoints
                 if best_kps is None:
-                    best_kps = {}  # empty dict — modules will skip gracefully
+                    best_kps = {}
                 wall_climbers.append((pid, bxyxy, best_kps))
 
-        # ── Select target ─────────────────────────────
-        target_id = select_target(wall_climbers)
-
-        # ── Per-climber modules ───────────────────────
+        target_id   = select_target(wall_climbers)
         active_wall = [c for c in wall_climbers
                        if not target_id or c[0] == target_id]
         sorted_pids = sorted([c[0] for c in active_wall])
@@ -938,9 +830,8 @@ def run(source, body_weight_kg=None, output_path=None):
             color       = id_color(pid)
             badge_index = sorted_pids.index(pid)
             all_kps_holds[pid] = kps
-            last_colors[pid] = color   # remember color for when climber is lost
+            last_colors[pid]   = color
 
-            # Init scorer for new IDs
             if pid not in scorers:
                 scorers[pid] = ClimbScorer(H)
 
@@ -949,52 +840,39 @@ def run(source, body_weight_kg=None, output_path=None):
 
             path_tracker.update(pid, kps)
             path_tracker.draw(frame, pid)
-            path_len   = path_tracker.path_length(pid)
-            hip_pos    = path_tracker.history[pid][-1] if path_tracker.history[pid] else None
+            path_len = path_tracker.path_length(pid)
+            hip_pos  = path_tracker.history[pid][-1] if path_tracker.history[pid] else None
 
             tri_status = draw_triangle(frame, kps)
-
             arm_status = lock_detector.update(pid, kps)
             lock_detector.draw(frame, pid, kps, arm_status)
-
             force_data = force_analyzer.analyze(kps) if force_analyzer else None
 
-            # Update scorer
             scorers[pid].update(tri_status, arm_status, force_data, hip_pos, path_len)
-
             draw_stats_panel(frame, pid, arm_status, force_data,
                              tri_status, path_len, color, force_analyzer)
-
-            # Draw live score badge
             scorers[pid].draw_live(frame, pid, color, badge_index)
 
-        # ── Persist score badges for lost climbers ──────
-        # Redraw badge for any climber we have a scorer for
-        # but who wasn't detected this frame
         all_known_pids = sorted(scorers.keys())
         for i, pid in enumerate(all_known_pids):
-            if pid not in sorted_pids:  # not detected this frame
+            if pid not in sorted_pids:
                 col = last_colors.get(pid, id_color(pid))
                 scorers[pid].draw_live(frame, pid, col, i)
 
-        # ── Hold grip detection ───────────────────────
         if grip_tracker:
             grip_tracker.update(all_kps_holds)
             grip_tracker.draw(frame)
             draw_legend(frame)
 
-        # ── FPS + info panel ──────────────────────────
         fps_cnt += 1
         if time.time() - fps_timer >= 1.0:
             disp_fps  = fps_cnt / (time.time() - fps_timer)
             fps_cnt   = 0
             fps_timer = time.time()
 
-        active_ids = sorted_pids
-        draw_info_panel(frame, frame_num, disp_fps, active_ids, device_name)
+        draw_info_panel(frame, frame_num, disp_fps, sorted_pids, device_name)
 
         if writer: writer.write(frame)
-
         cv2.imshow("Climbing AI", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("\nStopped by user.")
@@ -1003,15 +881,12 @@ def run(source, body_weight_kg=None, output_path=None):
         if frame_num % 100 == 0 and not is_live:
             pct = frame_num/total*100 if total > 0 else 0
             print(f"  [{pct:5.1f}%] frame {frame_num:5d}  "
-                  f"ids={len(active_ids)}  fps={disp_fps:.1f}  "
-                  f"device={device_name}")
+                  f"ids={len(sorted_pids)}  fps={disp_fps:.1f}")
 
-    # ── Final score overlay on last written frame ─────
     if writer and scorers:
-        final_frame  = np.zeros((H, W, 3), dtype=np.uint8)
-        sorted_pids  = sorted(scorers.keys())
-        total_cards  = len(sorted_pids)
-        # Header
+        final_frame = np.zeros((H, W, 3), dtype=np.uint8)
+        sorted_pids = sorted(scorers.keys())
+        total_cards = len(sorted_pids)
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(final_frame, "CLIMB COMPLETE",
                     (W//2-140, H//2-210), font, 1.0, (200,200,200), 2)
@@ -1024,12 +899,10 @@ def run(source, body_weight_kg=None, output_path=None):
         cv2.imshow("Climbing AI", final_frame)
         cv2.waitKey(2000)
 
-    # ── Cleanup ───────────────────────────────────────
     cap.release()
     if writer: writer.release()
     cv2.destroyAllWindows()
 
-    # ── Session summary ───────────────────────────────
     print("\n" + "="*55)
     print("  Session Summary")
     print("="*55)
