@@ -1,97 +1,103 @@
-# 🧗 Climbing AI — Real-Time Climbing Analysis on RK3588
+# Rock Climbing Analysis
 
-A real-time climbing analysis system built for the **Orange Pi 5 Plus (RK3588)** edge device. The system tracks climbers, detects holds, and provides live biomechanical feedback using computer vision — all running locally with no cloud dependency.
-
----
-
-## Overview
-
-This project combines pose estimation, multi-object tracking, and custom hold detection into a unified real-time pipeline. It was designed with edge deployment in mind from the start, targeting the RK3588 NPU via RKNN.
+Real-time AI-powered analysis system for rock climbing using computer vision and pose estimation. The system tracks climbers, evaluates technique, and provides live feedback and a detailed score report at the end of each climb.
 
 ---
 
 ## Features
 
-- **Climber tracking** — YOLO11m-pose + ByteTrack for stable per-climber IDs across frames
-- **Wall isolation** — automatic wall region filter to ignore background movement
-- **Auto-zoom crop** — dynamically crops around the active climber
-- **Path trail** — visualizes the climber's movement history on screen
-- **Triangle foot support** — detects when the foot is properly planted on a hold
-- **Lock arm warning** — flags when the arm is in a locked/overextended position
-- **Force bar** — estimates and displays load distribution in real time
-- **Hold detection** — custom-trained YOLO11n model (mAP@50 = 0.85), runs once at session start and is cached since holds don't move
-- **Grip confirmation** — requires 8 consecutive frames before confirming a grip to prevent false positives
+### Detection & Tracking
+- Real-time climber detection and multi-person tracking using YOLOv11 and ByteTrack
+- Two-phase detection for tall walls:
+  - **Phase 1** — full-frame detection to identify new climbers
+  - **Phase 2** — follow crop that tracks each climber as they climb higher, keeping them large in the crop regardless of wall height
+- Hold detection using a custom-trained YOLO model (grip holds and volume holds)
+- Grip tracking — detects which holds each climber's hands and feet are touching
+- Emergency zoom fallback for temporarily lost climbers
+
+### Scoring Metrics
+All scores are calculated per-frame and averaged across the full climb.
+
+**Triangle Stability**
+Evaluates the triangle formed by the climber's two wrists and one foot. Scored based on:
+- Height ratio: how high the wrists are above the foot relative to body height
+- Spread ratio: how wide the wrists are spread relative to body width
+
+**Arm Technique**
+Measures the percentage of frames where at least one arm is straight. Straight arms transfer load to the skeleton rather than muscles, reducing fatigue.
+
+**Limb Load Distribution**
+Estimates the load (kg) on each active contact point using inverse distance weighting from the center of gravity. Only limbs confirmed on holds are included.
+- Left Hand / Right Hand
+- Left Foot / Right Foot
+
+**Overall Score**
+Average of all 6 metrics: Triangle, Arm Technique, Left Hand, Right Hand, Left Foot, Right Foot.
+
+### Live Feedback
+- Per-climber stats panel showing triangle status, arm status, and live load per limb
+- Live score badge with 6 metric bars updated every frame
+- Red border alert when both arms are bent simultaneously for more than 3 seconds
+- Colored path trail per climber showing movement history
+- Hold visualization: idle / hand-touched / foot-touched / both
+
+### Final Score Card
+Displayed at the end of the video output:
+- Diamond radar chart (4 axes: LH, RH, LF, RF) with limb score in center
+- 6 metric bars: Triangle, Arm tech, Left Hand, Right Hand, Left Foot, Right Foot
+- Total score line at the bottom
 
 ---
 
-## Project Structure
+## Models
+
+| Model | Purpose |
+|---|---|
+| `yolo11m.onnx` | Person detection and tracking |
+| `yolo11m-pose.onnx` | Pose estimation (17 keypoints) |
+| `runs/hold_detection/weights/best.onnx` | Hold detection (custom trained) |
+
+ONNX models are required for inference. PyTorch `.pt` fallbacks are supported if ONNX files are not found.
+
+---
+
+## Requirements
 
 ```
-├── phase1_skeleton.py        # Pose estimation + ByteTrack IDs + wall filter + auto-zoom
-├── phase2_features.py        # Reads keypoint JSON → path trail, triangle support, lock arm, force bar
-├── phase3_train.py           # Fine-tuning YOLO11n hold detector
-├── phase3_validate.py        # Hold detection + 8-frame grip confirmation
-├── main.py                   # Unified real-time script — combines all phases
-├── bytetrack_climbing.yaml   # Custom ByteTrack config (90-frame buffer, stable IDs)
-└── main_rk3588.py            # (Phase 4) RK3588 deployment using RKNNLite API
+pip install ultralytics opencv-python numpy onnxruntime
 ```
 
 ---
 
-## Tech Stack
-
-| Component | Tool |
-|-----------|------|
-| Pose estimation | YOLO11m-pose (dev) / YOLO11n-pose (RK3588) |
-| Object tracking | ByteTrack |
-| Hold detection | YOLO11n (custom fine-tuned) |
-| Video processing | OpenCV |
-| Language | Python |
-| Target hardware | Orange Pi 5 Plus — Rockchip RK3588 |
-
----
-
-## Key Design Decisions
-
-**Pose model split** — YOLO11m is used during development for accuracy. YOLO11n is used for RK3588 deployment to fit within the NPU constraints.
-
-**Hold detection is cached** — holds are detected once at the start of each session and stored. Since holds don't move during a climb, re-running detection every frame would waste compute.
-
-**Grip confirmation uses 8 frames** — a single-frame detection is not enough to confirm a real grip. Requiring 8 consecutive frames eliminates false positives caused by hand passing near a hold.
-
-**Target selection** — currently set to `largest` bounding box when multiple climbers are present. This can be changed based on use case.
-
----
-
-## Remaining Work (Phase 4 — Deployment)
-
-- Flash Ubuntu on the Orange Pi 5 Plus (requires MicroSD)
-- Convert models to RKNN format:
-  ```bash
-  yolo export format=rknn name=rk3588
-  ```
-- Write `main_rk3588.py` using RKNNLite API instead of Ultralytics
-- Transfer files via SSH and test on device
-
----
-
-## Getting Started (Development — PC/GPU)
+## Usage
 
 ```bash
-pip install ultralytics opencv-python supervision
-python main.py
+# Run on a video file
+python main_crop4.py --source "your_video.mp4" --weight 65 --output result.mp4
+
+# Run on live camera
+python main_crop4.py --weight 65
+
+# Arguments
+--source   Path to video file or camera index (default: 0)
+--weight   Climber body weight in kg (required for load analysis)
+--output   Path to save annotated output video (optional)
 ```
 
-For RK3588 deployment, follow the [RKNN Toolkit 2 documentation](https://github.com/rockchip-linux/rknn-toolkit2).
+---
+
+## Script Versions
+
+| Script | Description |
+|---|---|
+| `main2.py` | Original base — detection, pose, path tracking |
+| `main_crop1.py` | Adds emergency zoom fallback for lost climbers |
+| `main_crop2.py` | Adds Phase 2 follow zoom for tall walls |
+| `main_crop3.py` | Adds normalized triangle and arm tech scoring |
+| `main_crop4.py` | Adds limb load analysis, diamond radar chart, red border alert |
 
 ---
 
-## Hardware Target
+## Hardware
 
-**Orange Pi 5 Plus** powered by the Rockchip **RK3588** — a 6 TOPS NPU capable of running quantized YOLO models in real time at the edge.
-
----
-
-## Author
-
-Ayoub Boudani
+Designed for deployment on **Orange Pi 5 Plus** with RK3588 NPU using RKNN models for real-time inference at 25-30 FPS. Development and testing on CPU.
