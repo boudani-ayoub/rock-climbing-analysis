@@ -1725,6 +1725,7 @@ def run(source, body_weight_kg=None, output_path=None):
 
     print("\nStarting... (press Q to quit)\n")
     frame_num = 0; fps_cnt = 0; fps_timer = time.time(); disp_fps = 0.0
+    live_clock_start = time.monotonic()
     # ── Stage timers (read / inference / draw / write) to find the real bottleneck ──
     t_read = t_infer = t_draw = t_write = 0.0
     detect_interval=max(1,int(DETECT_EVERY)); pose_interval=max(1,int(POSE_EVERY))
@@ -1877,7 +1878,8 @@ def run(source, body_weight_kg=None, output_path=None):
 
         # Update time-sensitive state exactly once per fresh pose. Cached draw poses
         # preserve the display but cannot confirm contacts, duration, or movement.
-        source_time = max(0.0, (frame_num - 1) / max(fps, 1e-6))
+        source_time = (time.monotonic()-live_clock_start if is_live else
+                       max(0.0,(frame_num-1)/max(fps,1e-6)))
         fresh_kps, fresh_boxes = {}, {}
         for pid, bxyxy, kps in active_wall:
             if pose_age.get(pid, 999) == 0 and pose_is_valid(kps):
