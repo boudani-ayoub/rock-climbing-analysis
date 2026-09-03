@@ -1,0 +1,9 @@
+# Record exact accepted versions after the Orange Pi validation run.
+numpy>=1.24,<3
+
+# Install OpenCV separately when using a board-specific build with GStreamer or
+# hardware encoding. Otherwise install a compatible opencv-python 4.x wheel.
+#
+# rknn_toolkit_lite2 is also installed from the Rockchip wheel matching the
+# board's RKNPU driver and the toolkit used to convert the models. It is not
+# listed as a generic PyPI dependency because that would imply false portability.

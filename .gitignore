@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Model binaries and calibration artefacts
+*.rknn
+*.onnx
+*.pt
+*.pth
+*.engine
+calibration_data/
+datasets/
+
+# Recorded media and generated output
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+results/
+outputs/
+runs/
+
+# Runtime diagnostics
+*.log
+*.csv
+*.jsonl

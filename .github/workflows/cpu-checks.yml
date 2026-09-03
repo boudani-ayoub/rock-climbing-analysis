@@ -1,0 +1,21 @@
+name: CPU checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Static analysis
+        run: python -m pyflakes rknn_finall.py tests/test_core_logic.py
+      - name: Core invariant tests
+        run: python -m pytest -q
